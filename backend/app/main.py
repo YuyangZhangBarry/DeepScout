@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 
 from backend.app.config import get_settings
 from backend.app.middleware.request_id import REQUEST_ID_HEADER, RequestIDMiddleware
+from backend.app.routers import tools as tools_router
 from backend.app.schemas import ErrorDetail, ErrorResponse, HealthResponse
 
 logger = logging.getLogger(__name__)
@@ -94,6 +95,8 @@ def create_app() -> FastAPI:
     @app.get("/health", response_model=HealthResponse, tags=["system"])
     async def health() -> HealthResponse:
         return HealthResponse(app=settings.app_name)
+
+    app.include_router(tools_router.router, prefix="/v1/tools", tags=["tools"])
 
     return app
 

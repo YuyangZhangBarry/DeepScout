@@ -12,8 +12,9 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
     """Attach a request id to each request (header or generated) for tracing."""
 
     async def dispatch(self, request: Request, call_next) -> Response:
-        incoming = request.headers.get(REQUEST_ID_HEADER.lower())
-        request_id = incoming.strip() if incoming else str(uuid.uuid4())
+        raw = request.headers.get(REQUEST_ID_HEADER.lower())
+        candidate = (raw or "").strip()
+        request_id = candidate or str(uuid.uuid4())
         request.state.request_id = request_id
 
         response = await call_next(request)
