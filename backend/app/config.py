@@ -31,6 +31,14 @@ class Settings(BaseSettings):
     fetch_timeout_seconds: float = 25.0
     fetch_max_concurrent: int = 5
 
+    # Research v0 (planning + synthesis, no vector DB yet)
+    research_max_subqueries: int = 8
+    research_min_subqueries: int = 3
+    research_max_papers: int = 14
+    research_max_fetch_urls: int = 5
+    research_excerpt_chars: int = 4500
+    research_context_max_chars: int = 32000
+
     @field_validator("search_provider")
     @classmethod
     def validate_search_provider(cls, v: str) -> str:

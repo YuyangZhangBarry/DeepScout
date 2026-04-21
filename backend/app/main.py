@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 
 from backend.app.config import get_settings
 from backend.app.middleware.request_id import REQUEST_ID_HEADER, RequestIDMiddleware
+from backend.app.routers import research as research_router
 from backend.app.routers import tools as tools_router
 from backend.app.schemas import ErrorDetail, ErrorResponse, HealthResponse
 
@@ -101,6 +102,7 @@ def create_app() -> FastAPI:
         return HealthResponse(app=settings.app_name)
 
     app.include_router(tools_router.router, prefix="/v1/tools", tags=["tools"])
+    app.include_router(research_router.router, prefix="/v1/research", tags=["research"])
 
     return app
 

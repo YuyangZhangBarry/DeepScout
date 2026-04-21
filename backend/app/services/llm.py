@@ -1,8 +1,31 @@
+import json
+import re
 from typing import Any
 
 import httpx
 
 from backend.app.config import Settings, get_settings
+
+
+def completion_message_text(data: dict[str, Any]) -> str:
+    """Extract assistant text from an OpenAI-compatible chat completion response."""
+    try:
+        choice0 = (data.get("choices") or [{}])[0]
+        msg = choice0.get("message") or {}
+        content = msg.get("content")
+        return (content or "").strip()
+    except (TypeError, AttributeError):
+        return ""
+
+
+def parse_json_object_from_content(raw: str) -> dict[str, Any]:
+    """Parse JSON object from model output; strips optional ```json fences."""
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```\s*$", "", text)
+        text = text.strip()
+    return json.loads(text)
 
 
 class DeepseekClient:
