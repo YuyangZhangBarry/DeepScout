@@ -7,7 +7,8 @@ from backend.app.main import create_app
 from backend.app.schemas_tools import FetchedDocument, SearchHit
 
 
-def test_search_without_tavily_key_returns_503(monkeypatch, clear_settings_cache) -> None:
+def test_search_tavily_without_key_returns_503(monkeypatch, clear_settings_cache) -> None:
+    monkeypatch.setenv("SEARCH_PROVIDER", "tavily")
     monkeypatch.setenv("TAVILY_API_KEY", "")
     get_settings.cache_clear()
     client = TestClient(create_app())
@@ -18,7 +19,7 @@ def test_search_without_tavily_key_returns_503(monkeypatch, clear_settings_cache
     assert "TAVILY_API_KEY" in body["error"]["message"]
 
 
-@patch("backend.app.routers.tools.search_web", new_callable=AsyncMock)
+@patch("backend.app.routers.tools.search_literature", new_callable=AsyncMock)
 def test_search_success_uses_mocked_search(mock_search, client) -> None:
     mock_search.return_value = [
         SearchHit(

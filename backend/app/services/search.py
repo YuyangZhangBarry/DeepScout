@@ -11,18 +11,116 @@ from backend.app.services.urlnorm import url_dedup_key
 logger = logging.getLogger(__name__)
 
 TAVILY_SEARCH_URL = "https://api.tavily.com/search"
+SEMANTIC_SCHOLAR_SEARCH_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
+
+
+def _hit_dedup_key(hit: SearchHit) -> str:
+    if hit.paper_id:
+        return f"paper:{hit.paper_id}"
+    return url_dedup_key(hit.url)
 
 
 def _dedupe_hits_preserving_order(hits: Iterable[SearchHit]) -> list[SearchHit]:
     seen: set[str] = set()
     out: list[SearchHit] = []
     for h in hits:
-        key = url_dedup_key(h.url)
+        key = _hit_dedup_key(h)
         if not key or key in seen:
             continue
         seen.add(key)
         out.append(h)
     return out
+
+
+def _s2_paper_to_hit(item: dict, source_query: str) -> SearchHit | None:
+    paper_id = (item.get("paperId") or "").strip()
+    title = (item.get("title") or "").strip()
+    abstract = (item.get("abstract") or "").strip()
+    year = item.get("year")
+    authors = item.get("authors") or []
+    author_line = ""
+    if isinstance(authors, list) and authors:
+        names = []
+        for a in authors[:12]:
+            if isinstance(a, dict) and a.get("name"):
+                names.append(str(a["name"]))
+        author_line = ", ".join(names)
+        if len(authors) > 12:
+            author_line += ", et al."
+
+    oa = item.get("openAccessPdf") if isinstance(item.get("openAccessPdf"), dict) else {}
+    url = ""
+    if isinstance(oa, dict):
+        url = (oa.get("url") or "").strip()
+    if not url:
+        url = (item.get("url") or "").strip()
+    if not url and paper_id:
+        url = f"https://www.semanticscholar.org/paper/{paper_id}"
+    if not url:
+        return None
+
+    meta_parts: list[str] = []
+    if year is not None:
+        meta_parts.append(str(year))
+    if author_line:
+        meta_parts.append(author_line)
+    header = " · ".join(meta_parts)
+    snippet = f"{header}\n\n{abstract}".strip() if header else abstract
+
+    return SearchHit(
+        url=url,
+        title=title,
+        snippet=snippet,
+        source_query=source_query,
+        paper_id=paper_id or None,
+    )
+
+
+async def _semantic_scholar_search_one(
+    client: httpx.AsyncClient,
+    *,
+    query: str,
+    max_results: int,
+    settings: Settings,
+) -> list[SearchHit]:
+    params = {
+        "query": query,
+        "limit": max_results,
+        "fields": "title,abstract,year,authors,url,openAccessPdf,paperId,externalIds",
+    }
+    headers: dict[str, str] = {"User-Agent": settings.http_user_agent}
+    if settings.semantic_scholar_api_key:
+        headers["x-api-key"] = settings.semantic_scholar_api_key
+
+    response: httpx.Response | None = None
+    for attempt in range(3):
+        response = await client.get(
+            SEMANTIC_SCHOLAR_SEARCH_URL,
+            params=params,
+            headers=headers,
+            timeout=60.0,
+        )
+        if response.status_code == 429 and attempt < 2:
+            wait_s = 1.5 * (2**attempt)
+            logger.info(
+                "semantic scholar rate limited; retry in %.1fs (attempt %s/3)",
+                wait_s,
+                attempt + 1,
+            )
+            await asyncio.sleep(wait_s)
+            continue
+        response.raise_for_status()
+        break
+    assert response is not None
+    data = response.json()
+    hits: list[SearchHit] = []
+    for item in data.get("data") or []:
+        if not isinstance(item, dict):
+            continue
+        hit = _s2_paper_to_hit(item, query)
+        if hit is not None:
+            hits.append(hit)
+    return hits
 
 
 async def _tavily_search_one(
@@ -58,7 +156,61 @@ async def _tavily_search_one(
     return hits
 
 
-async def search_web(
+async def _search_semantic_scholar(
+    queries: list[str],
+    *,
+    max_results_per_query: int,
+    settings: Settings,
+    client: httpx.AsyncClient,
+) -> list[SearchHit]:
+    tasks = [
+        _semantic_scholar_search_one(
+            client,
+            query=q,
+            max_results=max_results_per_query,
+            settings=settings,
+        )
+        for q in queries
+    ]
+    batches = await asyncio.gather(*tasks, return_exceptions=True)
+    merged: list[SearchHit] = []
+    for q, batch in zip(queries, batches):
+        if isinstance(batch, BaseException):
+            logger.warning("semantic scholar search failed for query=%r: %s", q, batch)
+            continue
+        merged.extend(batch)
+    return _dedupe_hits_preserving_order(merged)
+
+
+async def _search_tavily(
+    queries: list[str],
+    *,
+    max_results_per_query: int,
+    settings: Settings,
+    client: httpx.AsyncClient,
+) -> list[SearchHit]:
+    if not settings.tavily_api_key:
+        raise RuntimeError("TAVILY_API_KEY is not set (SEARCH_PROVIDER=tavily)")
+    tasks = [
+        _tavily_search_one(
+            client,
+            api_key=settings.tavily_api_key,
+            query=q,
+            max_results=max_results_per_query,
+        )
+        for q in queries
+    ]
+    batches = await asyncio.gather(*tasks, return_exceptions=True)
+    merged: list[SearchHit] = []
+    for q, batch in zip(queries, batches):
+        if isinstance(batch, BaseException):
+            logger.warning("tavily search failed for query=%r: %s", q, batch)
+            continue
+        merged.extend(batch)
+    return _dedupe_hits_preserving_order(merged)
+
+
+async def search_literature(
     queries: list[str],
     *,
     max_results_per_query: int | None = None,
@@ -66,12 +218,11 @@ async def search_web(
     client: httpx.AsyncClient | None = None,
 ) -> list[SearchHit]:
     """
-    Run web search for each query in parallel (Tavily), merge and de-duplicate by URL.
+    Parallel literature search, merge and de-duplicate.
+
+    Default provider is Semantic Scholar (papers). Set SEARCH_PROVIDER=tavily for general web.
     """
     cfg = settings or get_settings()
-    if not cfg.tavily_api_key:
-        raise RuntimeError("TAVILY_API_KEY is not set")
-
     cleaned = [q.strip() for q in queries if q and q.strip()]
     if not cleaned:
         return []
@@ -83,23 +234,29 @@ async def search_web(
         client = httpx.AsyncClient()
 
     try:
-        tasks = [
-            _tavily_search_one(
-                client,
-                api_key=cfg.tavily_api_key,
-                query=q,
-                max_results=limit,
+        if cfg.search_provider == "tavily":
+            return await _search_tavily(
+                cleaned, max_results_per_query=limit, settings=cfg, client=client
             )
-            for q in cleaned
-        ]
-        batches = await asyncio.gather(*tasks, return_exceptions=True)
-        merged: list[SearchHit] = []
-        for q, batch in zip(cleaned, batches):
-            if isinstance(batch, BaseException):
-                logger.warning("search failed for query=%r: %s", q, batch)
-                continue
-            merged.extend(batch)
-        return _dedupe_hits_preserving_order(merged)
+        return await _search_semantic_scholar(
+            cleaned, max_results_per_query=limit, settings=cfg, client=client
+        )
     finally:
         if own_client and client is not None:
             await client.aclose()
+
+
+async def search_web(
+    queries: list[str],
+    *,
+    max_results_per_query: int | None = None,
+    settings: Settings | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> list[SearchHit]:
+    """Alias for :func:`search_literature` (backwards compatible)."""
+    return await search_literature(
+        queries,
+        max_results_per_query=max_results_per_query,
+        settings=settings,
+        client=client,
+    )

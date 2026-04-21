@@ -6,10 +6,18 @@ class SearchHit(BaseModel):
     title: str = ""
     snippet: str = ""
     source_query: str = ""
+    paper_id: str | None = Field(
+        default=None,
+        description="Semantic Scholar paperId when provider is semantic_scholar",
+    )
 
 
 class SearchRequestBody(BaseModel):
-    queries: list[str] = Field(..., min_length=1, description="Parallel web search queries")
+    queries: list[str] = Field(
+        ...,
+        min_length=1,
+        description="Parallel search queries (paper keywords / sub-questions when using Semantic Scholar)",
+    )
     max_results_per_query: int | None = Field(
         default=None,
         ge=1,

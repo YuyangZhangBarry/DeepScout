@@ -36,6 +36,10 @@ def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(
         title=settings.app_name,
+        description=(
+            "Literature-first research backend: retrieve papers (Semantic Scholar by default), "
+            "fetch full text when available, then summarize with citations and structured reports."
+        ),
         version="0.1.0",
         debug=settings.debug,
     )

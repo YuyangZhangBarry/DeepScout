@@ -10,17 +10,21 @@ from backend.app.schemas_tools import (
     SearchResponseBody,
 )
 from backend.app.services.fetch import fetch_urls
-from backend.app.services.search import search_web
+from backend.app.services.search import search_literature
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 
-@router.post("/search", response_model=SearchResponseBody)
+@router.post(
+    "/search",
+    response_model=SearchResponseBody,
+    summary="Search evidence (papers by default)",
+)
 async def tools_search(body: SearchRequestBody) -> SearchResponseBody:
     try:
-        items = await search_web(
+        items = await search_literature(
             body.queries,
             max_results_per_query=body.max_results_per_query,
         )
