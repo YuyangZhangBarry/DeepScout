@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     # Literature search (default: Semantic Scholar Graph API)
     search_provider: str = "semantic_scholar"
     semantic_scholar_api_key: str = ""
+    # Anonymous S2 quota is tight; sequential + delay reduces 429 vs asyncio.gather burst.
+    semantic_scholar_parallel: bool = False
+    semantic_scholar_inter_query_delay_seconds: float = 0.55
 
     # Optional general web search (https://tavily.com/) when SEARCH_PROVIDER=tavily
     tavily_api_key: str = ""

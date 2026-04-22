@@ -3,8 +3,10 @@
 #   [research] stage=plan → stage=papers → (optional stage=fetch) → stage=answer
 #
 # Prereqs: .env with DEEPSEEK_API_KEY; SEMANTIC_SCHOLAR_API_KEY recommended.
-# Run API (separate terminal), INFO logs:
-#   uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --log-level info
+#
+# Logs: bare `grep '[research]'` reads stdin and looks empty — save logs first, then grep -F:
+#   uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --log-level info 2>&1 | tee /tmp/deepscout.log
+#   grep -F '[research]' /tmp/deepscout.log
 #
 # Then:
 #   ./scripts/week1_acceptance.sh
@@ -23,5 +25,5 @@ curl -sS -X POST "${BASE}/v1/research/" \
   | python3 -m json.tool
 
 echo ""
-echo "Done. On the server terminal, grep this run:"
-echo "  grep '\\[research\\]'   # plan → papers → answer"
+echo "Done. To verify plan → papers → answer in logs (literal bracket match):"
+echo "  grep -F '[research]' /tmp/deepscout.log"

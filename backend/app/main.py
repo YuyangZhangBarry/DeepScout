@@ -1,4 +1,5 @@
 import logging
+import sys
 import uuid
 from typing import Any
 
@@ -14,12 +15,31 @@ from backend.app.schemas import ErrorDetail, ErrorResponse, HealthResponse
 
 logger = logging.getLogger(__name__)
 
+_backend_logging_installed = False
+
 
 def _configure_app_logging(*, debug: bool) -> None:
-    """Make `backend.*` loggers visible at INFO (uvicorn leaves many libraries at WARNING)."""
+    """
+    Ensure `backend.*` INFO logs appear on stderr.
+
+    Uvicorn's default dictConfig often leaves app loggers without a visible handler;
+    only setting `.setLevel()` is not enough. We attach one StreamHandler on `backend`
+    and stop propagation at that node so lines like `[research] stage=plan` show up when
+    running `uvicorn ... --log-level info`.
+    """
+    global _backend_logging_installed
     level = logging.DEBUG if debug else logging.INFO
-    for name in ("backend", "backend.app", "backend.app.services", "backend.app.routers"):
-        logging.getLogger(name).setLevel(level)
+    root_backend = logging.getLogger("backend")
+    root_backend.setLevel(level)
+    if not _backend_logging_installed:
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setLevel(level)
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+        )
+        root_backend.addHandler(handler)
+        root_backend.propagate = False
+        _backend_logging_installed = True
 
 
 def _request_id(request: Request) -> str | None:

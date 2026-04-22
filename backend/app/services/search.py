@@ -93,19 +93,21 @@ async def _semantic_scholar_search_one(
         headers["x-api-key"] = settings.semantic_scholar_api_key
 
     response: httpx.Response | None = None
-    for attempt in range(3):
+    max_attempts = 5
+    for attempt in range(max_attempts):
         response = await client.get(
             SEMANTIC_SCHOLAR_SEARCH_URL,
             params=params,
             headers=headers,
             timeout=60.0,
         )
-        if response.status_code == 429 and attempt < 2:
-            wait_s = 1.5 * (2**attempt)
+        if response.status_code == 429 and attempt < max_attempts - 1:
+            wait_s = min(30.0, 2.0 * (2**attempt))
             logger.info(
-                "semantic scholar rate limited; retry in %.1fs (attempt %s/3)",
+                "semantic scholar rate limited; retry in %.1fs (attempt %s/%s)",
                 wait_s,
                 attempt + 1,
+                max_attempts,
             )
             await asyncio.sleep(wait_s)
             continue
@@ -163,22 +165,39 @@ async def _search_semantic_scholar(
     settings: Settings,
     client: httpx.AsyncClient,
 ) -> list[SearchHit]:
-    tasks = [
-        _semantic_scholar_search_one(
-            client,
-            query=q,
-            max_results=max_results_per_query,
-            settings=settings,
-        )
-        for q in queries
-    ]
-    batches = await asyncio.gather(*tasks, return_exceptions=True)
     merged: list[SearchHit] = []
-    for q, batch in zip(queries, batches):
-        if isinstance(batch, BaseException):
-            logger.warning("semantic scholar search failed for query=%r: %s", q, batch)
-            continue
-        merged.extend(batch)
+    if settings.semantic_scholar_parallel:
+        tasks = [
+            _semantic_scholar_search_one(
+                client,
+                query=q,
+                max_results=max_results_per_query,
+                settings=settings,
+            )
+            for q in queries
+        ]
+        batches = await asyncio.gather(*tasks, return_exceptions=True)
+        for q, batch in zip(queries, batches):
+            if isinstance(batch, BaseException):
+                logger.warning("semantic scholar search failed for query=%r: %s", q, batch)
+                continue
+            merged.extend(batch)
+        return _dedupe_hits_preserving_order(merged)
+
+    delay = max(0.0, settings.semantic_scholar_inter_query_delay_seconds)
+    for i, q in enumerate(queries):
+        if i > 0 and delay > 0:
+            await asyncio.sleep(delay)
+        try:
+            batch = await _semantic_scholar_search_one(
+                client,
+                query=q,
+                max_results=max_results_per_query,
+                settings=settings,
+            )
+            merged.extend(batch)
+        except Exception as exc:  # noqa: BLE001 — one failed query should not abort others
+            logger.warning("semantic scholar search failed for query=%r: %s", q, exc)
     return _dedupe_hits_preserving_order(merged)
 
 
