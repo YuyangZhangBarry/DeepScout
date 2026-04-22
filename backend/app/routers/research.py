@@ -2,7 +2,7 @@ import json
 import logging
 
 import httpx
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import ValidationError
 
 from backend.app.schemas_research import ResearchRequestBody, ResearchResponseBody
@@ -18,7 +18,13 @@ router = APIRouter()
     response_model=ResearchResponseBody,
     summary="Run literature research v0 (plan → search → optional fetch → synthesis)",
 )
-async def post_research(body: ResearchRequestBody) -> ResearchResponseBody:
+async def post_research(request: Request, body: ResearchRequestBody) -> ResearchResponseBody:
+    rid = getattr(request.state, "request_id", None)
+    logger.info(
+        "[research] request_start request_id=%s question_chars=%s",
+        rid,
+        len(body.question),
+    )
     try:
         return await run_research_v0(body)
     except RuntimeError as exc:

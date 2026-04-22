@@ -1,3 +1,4 @@
+import json
 import logging
 import re
 from typing import NamedTuple
@@ -237,10 +238,29 @@ async def run_research_v0(
         min_q=min_sub,
         max_q=max_sub,
     )
+    logger.info(
+        "[research] stage=plan n_queries=%s queries=%s",
+        len(planning_queries),
+        json.dumps(planning_queries, ensure_ascii=False),
+    )
 
     max_papers = body.max_papers or cfg.research_max_papers
     hits = await search_literature(planning_queries, settings=cfg)
     hits = hits[:max_papers]
+    paper_log = [
+        {
+            "i": i,
+            "paper_id": h.paper_id,
+            "url": h.url,
+            "title": (h.title or "")[:160],
+        }
+        for i, h in enumerate(hits)
+    ]
+    logger.info(
+        "[research] stage=papers n_hits=%s urls=%s",
+        len(hits),
+        json.dumps(paper_log, ensure_ascii=False),
+    )
 
     max_fetch = body.max_fetch_urls if body.max_fetch_urls is not None else cfg.research_max_fetch_urls
     fetch_text_by_key: dict[str, str] = {}
@@ -252,6 +272,11 @@ async def run_research_v0(
                 continue
             key = url_dedup_key(d.final_url or d.url)
             fetch_text_by_key[key] = (d.text or "")[:4000]
+        logger.info(
+            "[research] stage=fetch n_requested=%s n_text_hits=%s",
+            min(max_fetch, len(hits)),
+            len(fetch_text_by_key),
+        )
 
     rows: list[_EvidenceRow] = []
     for i, hit in enumerate(hits):
@@ -285,6 +310,11 @@ async def run_research_v0(
             report_markdown="# Report\n\n_No sources retrieved._\n",
             citations=[],
         )
+        logger.info(
+            "[research] stage=answer mode=empty_evidence exec_summary_chars=%s report_chars=%s",
+            len(answer.executive_summary),
+            len(answer.report_markdown),
+        )
         return ResearchResponseBody(
             question=body.question,
             planning_queries=planning_queries,
@@ -293,6 +323,13 @@ async def run_research_v0(
         )
 
     answer = await _llm_synthesize(llm, question=body.question, rows=rows, cfg=cfg)
+    logger.info(
+        "[research] stage=answer exec_summary_chars=%s report_chars=%s key_points=%s citations=%s",
+        len(answer.executive_summary),
+        len(answer.report_markdown),
+        len(answer.key_points),
+        len(answer.citations),
+    )
 
     evidence_out = [
         EvidenceSourceOut(

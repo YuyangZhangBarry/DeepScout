@@ -15,6 +15,13 @@ from backend.app.schemas import ErrorDetail, ErrorResponse, HealthResponse
 logger = logging.getLogger(__name__)
 
 
+def _configure_app_logging(*, debug: bool) -> None:
+    """Make `backend.*` loggers visible at INFO (uvicorn leaves many libraries at WARNING)."""
+    level = logging.DEBUG if debug else logging.INFO
+    for name in ("backend", "backend.app", "backend.app.services", "backend.app.routers"):
+        logging.getLogger(name).setLevel(level)
+
+
 def _request_id(request: Request) -> str | None:
     return getattr(request.state, "request_id", None)
 
@@ -35,6 +42,7 @@ def _error_payload(
 
 def create_app() -> FastAPI:
     settings = get_settings()
+    _configure_app_logging(debug=settings.debug)
     app = FastAPI(
         title=settings.app_name,
         description=(
