@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-chat"
 
+    # Optional OpenAI key (e.g. same vendor); used as fallback for embeddings when EMBEDDING_API_KEY is empty
+    openai_api_key: str = ""
+
     # Literature search (default: Semantic Scholar Graph API)
     search_provider: str = "semantic_scholar"
     semantic_scholar_api_key: str = ""
@@ -41,6 +44,17 @@ class Settings(BaseSettings):
     research_max_fetch_urls: int = 5
     research_excerpt_chars: int = 4500
     research_context_max_chars: int = 32000
+
+    # RAG (Day 8–10): embeddings + Chroma per-request collection
+    rag_enabled: bool = True
+    chroma_persist_directory: str = "./data/chroma"
+    embedding_api_key: str = ""  # if empty, falls back to openai_api_key
+    embedding_base_url: str = "https://api.openai.com/v1"
+    embedding_model: str = "text-embedding-3-small"
+    embedding_batch_size: int = 32
+    rag_chunk_size: int = 900
+    rag_chunk_overlap: int = 120
+    rag_top_k: int = 12
 
     @field_validator("search_provider")
     @classmethod

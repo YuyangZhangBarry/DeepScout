@@ -21,6 +21,16 @@ class ResearchRequestBody(BaseModel):
         le=15,
         description="Fetch full HTML for first N hits; 0 = abstracts/snippets only",
     )
+    use_rag: bool | None = Field(
+        default=None,
+        description="None: follow settings RAG_ENABLED + keys; False: skip vector retrieval",
+    )
+    rag_top_k: int | None = Field(
+        default=None,
+        ge=1,
+        le=40,
+        description="Top-k chunks from Chroma for synthesis context",
+    )
 
 
 class KeyPoint(BaseModel):
@@ -56,3 +66,7 @@ class ResearchResponseBody(BaseModel):
     planning_queries: list[str]
     evidence: list[EvidenceSourceOut]
     answer: ResearchAnswerPayload
+    rag_used: bool = Field(
+        default=False,
+        description="True when Chroma+embeddings retrieval supplied synthesis context",
+    )

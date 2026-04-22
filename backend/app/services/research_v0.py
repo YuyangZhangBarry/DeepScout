@@ -20,6 +20,7 @@ from backend.app.services.llm import (
     completion_message_text,
     parse_json_object_from_content,
 )
+from backend.app.services.rag_retrieve import maybe_rag_context_blocks
 from backend.app.services.search import search_literature
 from backend.app.services.urlnorm import url_dedup_key
 
@@ -320,9 +321,47 @@ async def run_research_v0(
             planning_queries=planning_queries,
             evidence=[],
             answer=answer,
+            rag_used=False,
         )
 
-    answer = await _llm_synthesize(llm, question=body.question, rows=rows, cfg=cfg)
+    use_rag = cfg.rag_enabled if body.use_rag is None else body.use_rag
+    rows_for_synth: list[_EvidenceRow] = list(rows)
+    rag_used = False
+    if use_rag and (cfg.embedding_api_key or cfg.openai_api_key).strip():
+        top_k = body.rag_top_k or cfg.rag_top_k
+        try:
+            blocks = await maybe_rag_context_blocks(
+                rows,
+                question=body.question,
+                settings=cfg,
+                top_k=top_k,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[research] stage=rag unexpected error: %s", exc)
+            blocks = None
+        if blocks:
+            rows_for_synth = [
+                _EvidenceRow(
+                    source_id=str(b["source_id"]),
+                    paper_id=b.get("paper_id"),
+                    url=str(b.get("url") or ""),
+                    title=str(b.get("title") or ""),
+                    text=str(b.get("text") or ""),
+                )
+                for b in blocks
+            ]
+            rag_used = True
+            logger.info(
+                "[research] stage=rag n_chunks=%s top_k=%s (Chroma ephemeral collection)",
+                len(rows_for_synth),
+                top_k,
+            )
+        else:
+            logger.info("[research] stage=rag skipped (no chunks, embed failure, or empty hits)")
+    elif use_rag:
+        logger.info("[research] stage=rag skipped (no EMBEDDING_API_KEY / OPENAI_API_KEY)")
+
+    answer = await _llm_synthesize(llm, question=body.question, rows=rows_for_synth, cfg=cfg)
     logger.info(
         "[research] stage=answer exec_summary_chars=%s report_chars=%s key_points=%s citations=%s",
         len(answer.executive_summary),
@@ -347,4 +386,5 @@ async def run_research_v0(
         planning_queries=planning_queries,
         evidence=evidence_out,
         answer=answer,
+        rag_used=rag_used,
     )
