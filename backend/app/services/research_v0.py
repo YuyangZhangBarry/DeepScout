@@ -15,6 +15,7 @@ from backend.app.schemas_research import (
     ResearchResponseBody,
 )
 from backend.app.services.fetch import fetch_urls_with_retry
+from backend.app.services.embeddings import embedding_credentials_configured
 from backend.app.services.llm import (
     DeepseekClient,
     completion_message_text,
@@ -412,7 +413,7 @@ async def run_research_v0(
     use_rag = cfg.rag_enabled if body.use_rag is None else body.use_rag
     rows_for_synth: list[_EvidenceRow] = list(rows)
     rag_used = False
-    if use_rag and (cfg.embedding_api_key or cfg.openai_api_key).strip():
+    if use_rag and embedding_credentials_configured(cfg):
         _emit_phase(trace, ResearchPhase.INDEXING, f"n_evidence_rows={len(rows)}")
         top_k = body.rag_top_k or cfg.rag_top_k
         hybrid = cfg.rag_hybrid_enabled if body.use_rag_hybrid is None else body.use_rag_hybrid

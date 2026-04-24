@@ -8,6 +8,11 @@ from backend.app.config import Settings
 logger = logging.getLogger(__name__)
 
 
+def embedding_credentials_configured(settings: Settings) -> bool:
+    """True when either embedding or OpenAI key is set (non-whitespace)."""
+    return bool((settings.embedding_api_key or settings.openai_api_key or "").strip())
+
+
 def _embedding_api_key(settings: Settings) -> str:
     key = (settings.embedding_api_key or settings.openai_api_key or "").strip()
     if not key:
