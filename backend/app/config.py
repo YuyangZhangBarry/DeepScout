@@ -55,6 +55,10 @@ class Settings(BaseSettings):
     rag_chunk_size: int = 900
     rag_chunk_overlap: int = 120
     rag_top_k: int = 12
+    # Hybrid retrieval: BM25 + vector (RRF fusion); pool = candidates per channel before merge
+    rag_hybrid_enabled: bool = True
+    rag_hybrid_pool: int = 32
+    rag_hybrid_rrf_k: int = 60
 
     @field_validator("search_provider")
     @classmethod

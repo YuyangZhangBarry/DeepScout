@@ -9,6 +9,11 @@ from typing import Any
 from backend.app.config import Settings
 from backend.app.services.embeddings import embed_texts
 from backend.app.services.rag_chroma import _index_and_query_sync, build_chunk_corpus
+from backend.app.services.rag_hybrid import (
+    bm25_ranked_chunk_ids,
+    build_blocks_from_chunk_ids,
+    fuse_vector_and_bm25,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -19,9 +24,10 @@ async def maybe_rag_context_blocks(
     question: str,
     settings: Settings,
     top_k: int,
+    hybrid_enabled: bool | None = None,
 ) -> list[dict[str, Any]] | None:
     """
-    Chunk + embed + Chroma query for this request (ephemeral collection).
+    Chunk + embed + Chroma dense search; optionally BM25 + RRF hybrid, then top-k for synthesis.
 
     Returns list of {source_id, paper_id, url, title, text, distance} for top chunks,
     or None to signal caller should fall back to full-row excerpts.
@@ -36,6 +42,8 @@ async def maybe_rag_context_blocks(
     if not chunk_texts:
         return None
 
+    hybrid_on = settings.rag_hybrid_enabled if hybrid_enabled is None else hybrid_enabled
+
     try:
         doc_embeddings = await embed_texts(chunk_texts, settings=settings)
         query_embeddings = await embed_texts([question], settings=settings)
@@ -44,8 +52,12 @@ async def maybe_rag_context_blocks(
         return None
 
     collection_name = f"r_{uuid.uuid4().hex[:24]}"
+    n_chunks = len(ids)
+    pool = min(max(settings.rag_hybrid_pool, top_k), n_chunks)
+    vec_k = pool if hybrid_on else min(top_k, n_chunks)
+
     try:
-        hits = await asyncio.to_thread(
+        raw_hits = await asyncio.to_thread(
             _index_and_query_sync,
             persist_dir=settings.chroma_persist_directory,
             collection_name=collection_name,
@@ -54,36 +66,52 @@ async def maybe_rag_context_blocks(
             metadatas=metadatas,
             ids=ids,
             query_embedding=query_embeddings[0],
-            top_k=top_k,
+            top_k=vec_k,
         )
     except Exception as exc:
         logger.warning("[research] stage=rag chroma failed: %s", exc)
         return None
 
-    out: list[dict[str, Any]] = []
-    for doc, meta, dist in hits:
-        sid = str(meta.get("source_id") or "")
-        if not sid:
-            continue
-        ci = meta.get("chunk_index", 0)
-        title = str(meta.get("title") or "")
-        text = f"(chunk {ci}) {doc}".strip()
-        pid_raw = meta.get("paper_id")
-        paper_id_val: str | None
-        if isinstance(pid_raw, str) and pid_raw.strip():
-            paper_id_val = pid_raw.strip()
-        else:
-            paper_id_val = None
-        out.append(
-            {
-                "source_id": sid,
-                "paper_id": paper_id_val,
-                "url": str(meta.get("url") or ""),
-                "title": title,
-                "text": text,
-                "distance": dist,
-            }
+    vector_ranked_ids = [h[0] for h in raw_hits if h[0]]
+    dist_by_id = {h[0]: h[3] for h in raw_hits if h[0]}
+
+    if hybrid_on:
+        try:
+            bm25_ids = bm25_ranked_chunk_ids(chunk_texts, ids, question, pool)
+        except Exception as exc:
+            logger.warning("[research] stage=rag bm25 failed, dense-only: %s", exc)
+            bm25_ids = []
+        fused_ids = fuse_vector_and_bm25(
+            vector_ranked_ids=vector_ranked_ids,
+            bm25_ranked_ids=bm25_ids,
+            rrf_k=settings.rag_hybrid_rrf_k,
+            top_k=top_k,
         )
+        logger.info(
+            "[research] stage=rag hybrid pool=%s vec_candidates=%s bm25_candidates=%s fused=%s rrf_k=%s",
+            pool,
+            len(vector_ranked_ids),
+            len(bm25_ids),
+            len(fused_ids),
+            settings.rag_hybrid_rrf_k,
+        )
+        out = build_blocks_from_chunk_ids(
+            fused_ids,
+            chunk_texts=chunk_texts,
+            metadatas=metadatas,
+            ids=ids,
+            vector_distance_by_id=dist_by_id,
+        )
+    else:
+        out = build_blocks_from_chunk_ids(
+            vector_ranked_ids[:top_k],
+            chunk_texts=chunk_texts,
+            metadatas=metadatas,
+            ids=ids,
+            vector_distance_by_id=dist_by_id,
+        )
+        logger.info("[research] stage=rag dense_only n_hits=%s", len(out))
+
     if not out:
         return None
     return out

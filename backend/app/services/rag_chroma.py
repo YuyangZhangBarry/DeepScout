@@ -23,8 +23,12 @@ def _index_and_query_sync(
     ids: list[str],
     query_embedding: list[float],
     top_k: int,
-) -> list[tuple[str, dict[str, Any], float]]:
-    """Run Chroma in a blocking context (call via asyncio.to_thread)."""
+) -> list[tuple[str, str, dict[str, Any], float]]:
+    """
+    Run Chroma in a blocking context (call via asyncio.to_thread).
+
+    Returns list of (chunk_id, document, metadata, distance) in similarity order.
+    """
     import chromadb
     from chromadb.config import Settings as ChromaSettings
 
@@ -50,17 +54,26 @@ def _index_and_query_sync(
         res = coll.query(
             query_embeddings=[query_embedding],
             n_results=k,
-            include=["documents", "metadatas", "distances"],
+            include=["documents", "metadatas", "distances", "ids"],
         )
         docs = (res.get("documents") or [[]])[0] or []
         metas = (res.get("metadatas") or [[]])[0] or []
         dists = (res.get("distances") or [[]])[0] or []
-        out: list[tuple[str, dict[str, Any], float]] = []
-        for doc, meta, dist in zip(docs, metas, dists):
+        id_rows = (res.get("ids") or [[]])[0] or []
+        out: list[tuple[str, str, dict[str, Any], float]] = []
+        for cid, doc, meta, dist in zip(id_rows, docs, metas, dists):
             if doc is None:
                 continue
             meta = meta or {}
-            out.append((str(doc), meta, float(dist) if dist is not None else 0.0))
+            chunk_id = str(cid) if cid is not None else ""
+            out.append(
+                (
+                    chunk_id,
+                    str(doc),
+                    meta,
+                    float(dist) if dist is not None else 0.0,
+                )
+            )
         return out
     finally:
         try:

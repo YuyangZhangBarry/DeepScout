@@ -31,6 +31,10 @@ class ResearchRequestBody(BaseModel):
         le=40,
         description="Top-k chunks from Chroma for synthesis context",
     )
+    use_rag_hybrid: bool | None = Field(
+        default=None,
+        description="None: follow RAG_HYBRID_ENABLED; False: dense-only (no BM25/RRF)",
+    )
 
 
 class KeyPoint(BaseModel):

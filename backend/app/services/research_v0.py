@@ -330,11 +330,13 @@ async def run_research_v0(
     if use_rag and (cfg.embedding_api_key or cfg.openai_api_key).strip():
         top_k = body.rag_top_k or cfg.rag_top_k
         try:
+            hybrid = cfg.rag_hybrid_enabled if body.use_rag_hybrid is None else body.use_rag_hybrid
             blocks = await maybe_rag_context_blocks(
                 rows,
                 question=body.question,
                 settings=cfg,
                 top_k=top_k,
+                hybrid_enabled=hybrid,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[research] stage=rag unexpected error: %s", exc)
