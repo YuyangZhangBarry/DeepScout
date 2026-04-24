@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     research_max_fetch_urls: int = 5
     research_excerpt_chars: int = 4500
     research_context_max_chars: int = 32000
+    # Day 11–12: orchestration / resilience
+    research_search_retry_on_empty: bool = True
+    research_fetch_max_rounds: int = 2
 
     # RAG (Day 8–10): embeddings + Chroma per-request collection
     rag_enabled: bool = True

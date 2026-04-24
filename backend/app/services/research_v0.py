@@ -14,17 +14,25 @@ from backend.app.schemas_research import (
     ResearchRequestBody,
     ResearchResponseBody,
 )
-from backend.app.services.fetch import fetch_urls
+from backend.app.services.fetch import fetch_urls_with_retry
 from backend.app.services.llm import (
     DeepseekClient,
     completion_message_text,
     parse_json_object_from_content,
 )
 from backend.app.services.rag_retrieve import maybe_rag_context_blocks
+from backend.app.services.research_phases import ResearchPhase
 from backend.app.services.search import search_literature
 from backend.app.services.urlnorm import url_dedup_key
 
 logger = logging.getLogger(__name__)
+
+
+def _emit_phase(trace: list[str], phase: ResearchPhase, detail: str = "") -> None:
+    line = f"{phase.value}:{detail}" if detail else phase.value
+    trace.append(line)
+    suffix = f" detail={detail}" if detail else ""
+    logger.info("[research] phase=%s%s", phase.value, suffix)
 
 
 class _EvidenceRow(NamedTuple):
@@ -107,6 +115,41 @@ async def _llm_plan_queries(
     obj = parse_json_object_from_content(text)
     parsed = _PlanningOut.model_validate(obj)
     return _clamp_queries(parsed.queries, question=question, lo=min_q, hi=max_q)
+
+
+async def _llm_rewrite_queries_for_retry(
+    client: DeepseekClient,
+    *,
+    question: str,
+    previous_queries: list[str],
+) -> list[str]:
+    """One-shot broader queries when the first literature search returned no hits."""
+    system = (
+        "The first Semantic Scholar search returned zero usable papers. "
+        "Propose 4-8 NEW short English queries: broader keywords, synonyms, add words like "
+        "survey, review, overview, methods, benchmark, or adjacent subtopics. "
+        "Do not repeat the previous queries verbatim. "
+        'Return JSON only: {"queries": ["...", "..."]}.'
+    )
+    payload = json.dumps(
+        {"research_question": question, "previous_queries": previous_queries},
+        ensure_ascii=False,
+    )
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": payload},
+    ]
+    data = await client.chat_completion(
+        messages,
+        temperature=0.45,
+        max_tokens=700,
+        response_format={"type": "json_object"},
+        timeout=90.0,
+    )
+    text = completion_message_text(data)
+    obj = parse_json_object_from_content(text)
+    parsed = _PlanningOut.model_validate(obj)
+    return _clamp_queries(parsed.queries, question=question, lo=3, hi=8)
 
 
 def _trim_rows(rows: list[_EvidenceRow], max_chars: int) -> list[_EvidenceRow]:
@@ -224,15 +267,18 @@ async def run_research_v0(
     settings: Settings | None = None,
 ) -> ResearchResponseBody:
     """
-    End-to-end v0: plan queries → literature search → optional fetch → Deepseek JSON synthesis.
+    Orchestrated pipeline (Day 11–12): explicit phases, search retry on empty hits, fetch retry.
     """
     cfg = settings or get_settings()
     llm = DeepseekClient(cfg)
+    trace: list[str] = []
+    search_retry_queries: list[str] = []
 
     max_sub = body.max_subqueries or cfg.research_max_subqueries
     max_sub = max(cfg.research_min_subqueries, min(max_sub, 12))
     min_sub = min(cfg.research_min_subqueries, max_sub)
 
+    _emit_phase(trace, ResearchPhase.PLANNING, "start")
     planning_queries = await _llm_plan_queries(
         llm,
         question=body.question,
@@ -244,9 +290,32 @@ async def run_research_v0(
         len(planning_queries),
         json.dumps(planning_queries, ensure_ascii=False),
     )
+    _emit_phase(trace, ResearchPhase.PLANNING, f"n_queries={len(planning_queries)}")
 
     max_papers = body.max_papers or cfg.research_max_papers
+    _emit_phase(trace, ResearchPhase.TOOLING, "search_start")
     hits = await search_literature(planning_queries, settings=cfg)
+
+    if not hits and cfg.research_search_retry_on_empty:
+        _emit_phase(trace, ResearchPhase.TOOLING, "search_empty_retry_llm")
+        try:
+            search_retry_queries = await _llm_rewrite_queries_for_retry(
+                llm,
+                question=body.question,
+                previous_queries=planning_queries,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _emit_phase(trace, ResearchPhase.TOOLING, f"search_retry_plan_failed={type(exc).__name__}")
+            search_retry_queries = []
+        if search_retry_queries:
+            logger.info(
+                "[research] stage=search_retry n_queries=%s queries=%s",
+                len(search_retry_queries),
+                json.dumps(search_retry_queries, ensure_ascii=False),
+            )
+            hits = await search_literature(search_retry_queries, settings=cfg)
+            _emit_phase(trace, ResearchPhase.TOOLING, f"search_retry_hits={len(hits)}")
+
     hits = hits[:max_papers]
     paper_log = [
         {
@@ -262,21 +331,33 @@ async def run_research_v0(
         len(hits),
         json.dumps(paper_log, ensure_ascii=False),
     )
+    _emit_phase(trace, ResearchPhase.TOOLING, f"search_hits={len(hits)}")
 
     max_fetch = body.max_fetch_urls if body.max_fetch_urls is not None else cfg.research_max_fetch_urls
     fetch_text_by_key: dict[str, str] = {}
     if max_fetch > 0 and hits:
+        _emit_phase(trace, ResearchPhase.TOOLING, "fetch_start")
         urls = [h.url for h in hits[:max_fetch]]
-        docs = await fetch_urls(urls, settings=cfg)
+        docs = await fetch_urls_with_retry(
+            urls,
+            settings=cfg,
+            max_rounds=cfg.research_fetch_max_rounds,
+        )
         for d in docs:
             if d.error or not (d.text or "").strip():
                 continue
             key = url_dedup_key(d.final_url or d.url)
             fetch_text_by_key[key] = (d.text or "")[:4000]
         logger.info(
-            "[research] stage=fetch n_requested=%s n_text_hits=%s",
+            "[research] stage=fetch n_requested=%s n_text_hits=%s rounds=%s",
             min(max_fetch, len(hits)),
             len(fetch_text_by_key),
+            cfg.research_fetch_max_rounds,
+        )
+        _emit_phase(
+            trace,
+            ResearchPhase.TOOLING,
+            f"fetch_ok_urls={len(fetch_text_by_key)}",
         )
 
     rows: list[_EvidenceRow] = []
@@ -316,21 +397,26 @@ async def run_research_v0(
             len(answer.executive_summary),
             len(answer.report_markdown),
         )
+        _emit_phase(trace, ResearchPhase.ANSWERING, "empty_evidence_stub")
+        _emit_phase(trace, ResearchPhase.DONE, "empty_evidence")
         return ResearchResponseBody(
             question=body.question,
             planning_queries=planning_queries,
+            search_retry_queries=search_retry_queries,
             evidence=[],
             answer=answer,
             rag_used=False,
+            phase_trace=trace,
         )
 
     use_rag = cfg.rag_enabled if body.use_rag is None else body.use_rag
     rows_for_synth: list[_EvidenceRow] = list(rows)
     rag_used = False
     if use_rag and (cfg.embedding_api_key or cfg.openai_api_key).strip():
+        _emit_phase(trace, ResearchPhase.INDEXING, f"n_evidence_rows={len(rows)}")
         top_k = body.rag_top_k or cfg.rag_top_k
+        hybrid = cfg.rag_hybrid_enabled if body.use_rag_hybrid is None else body.use_rag_hybrid
         try:
-            hybrid = cfg.rag_hybrid_enabled if body.use_rag_hybrid is None else body.use_rag_hybrid
             blocks = await maybe_rag_context_blocks(
                 rows,
                 question=body.question,
@@ -358,11 +444,19 @@ async def run_research_v0(
                 len(rows_for_synth),
                 top_k,
             )
+            _emit_phase(
+                trace,
+                ResearchPhase.RETRIEVING,
+                f"rag_chunks={len(rows_for_synth)} hybrid={hybrid}",
+            )
         else:
             logger.info("[research] stage=rag skipped (no chunks, embed failure, or empty hits)")
+            _emit_phase(trace, ResearchPhase.RETRIEVING, "skipped_or_empty")
     elif use_rag:
         logger.info("[research] stage=rag skipped (no EMBEDDING_API_KEY / OPENAI_API_KEY)")
+        _emit_phase(trace, ResearchPhase.INDEXING, "skipped_no_embedding_key")
 
+    _emit_phase(trace, ResearchPhase.ANSWERING, "synthesize_start")
     answer = await _llm_synthesize(llm, question=body.question, rows=rows_for_synth, cfg=cfg)
     logger.info(
         "[research] stage=answer exec_summary_chars=%s report_chars=%s key_points=%s citations=%s",
@@ -371,6 +465,7 @@ async def run_research_v0(
         len(answer.key_points),
         len(answer.citations),
     )
+    _emit_phase(trace, ResearchPhase.ANSWERING, "synthesize_done")
 
     evidence_out = [
         EvidenceSourceOut(
@@ -383,10 +478,13 @@ async def run_research_v0(
         for r in rows
     ]
 
+    _emit_phase(trace, ResearchPhase.DONE, "ok")
     return ResearchResponseBody(
         question=body.question,
         planning_queries=planning_queries,
+        search_retry_queries=search_retry_queries,
         evidence=evidence_out,
         answer=answer,
         rag_used=rag_used,
+        phase_trace=trace,
     )

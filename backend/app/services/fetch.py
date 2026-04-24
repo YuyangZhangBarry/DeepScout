@@ -123,3 +123,41 @@ async def fetch_urls(
     finally:
         if shared_client is not None:
             await shared_client.aclose()
+
+
+async def fetch_urls_with_retry(
+    urls: Iterable[str],
+    *,
+    settings: Settings | None = None,
+    max_rounds: int = 2,
+) -> list[FetchedDocument]:
+    """
+    Like :func:`fetch_urls`, but optionally runs a second round only for URLs that
+    failed or returned empty extracted text (Day 11–12 fetch resilience).
+    """
+    cfg = settings or get_settings()
+    url_list = [u for u in urls if (u or "").strip()]
+    if not url_list:
+        return []
+    rounds = max(1, min(int(max_rounds), 3))
+    first = await fetch_urls(url_list, settings=cfg)
+    if rounds < 2:
+        return first
+
+    merged = list(first)
+    retry_idx = [
+        i
+        for i, d in enumerate(first)
+        if d.error or not (d.text or "").strip()
+    ]
+    if not retry_idx:
+        return merged
+
+    to_retry = [url_list[i] for i in retry_idx]
+    second = await fetch_urls(to_retry, settings=cfg)
+    for j, i in enumerate(retry_idx):
+        if j < len(second):
+            nd = second[j]
+            if not nd.error and (nd.text or "").strip():
+                merged[i] = nd
+    return merged

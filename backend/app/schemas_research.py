@@ -68,9 +68,17 @@ class EvidenceSourceOut(BaseModel):
 class ResearchResponseBody(BaseModel):
     question: str
     planning_queries: list[str]
+    search_retry_queries: list[str] = Field(
+        default_factory=list,
+        description="Second-pass search queries when the first search returned no hits (empty if unused)",
+    )
     evidence: list[EvidenceSourceOut]
     answer: ResearchAnswerPayload
     rag_used: bool = Field(
         default=False,
         description="True when Chroma+embeddings retrieval supplied synthesis context",
+    )
+    phase_trace: list[str] = Field(
+        default_factory=list,
+        description="Ordered phase transitions for debugging (PLANNING/TOOLING/…)",
     )
