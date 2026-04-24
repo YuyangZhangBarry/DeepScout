@@ -82,3 +82,19 @@ class ResearchResponseBody(BaseModel):
         default_factory=list,
         description="Ordered phase transitions for debugging (PLANNING/TOOLING/…)",
     )
+
+
+class ResearchJobCreatedResponse(BaseModel):
+    job_id: str
+    status: str = "pending"
+    poll_url: str
+    events_url: str
+
+
+class ResearchJobStatusResponse(BaseModel):
+    job_id: str
+    status: str
+    phase: str | None = None
+    error: str | None = None
+    events: list[dict] = Field(default_factory=list)
+    result: ResearchResponseBody | None = None
