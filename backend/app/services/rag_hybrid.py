@@ -24,7 +24,9 @@ def bm25_ranked_chunk_ids(
     try:
         from rank_bm25 import BM25Okapi
     except ImportError as exc:  # pragma: no cover
-        raise RuntimeError("rank-bm25 is required for hybrid RAG") from exc
+        raise RuntimeError(
+            "rank-bm25 is required for hybrid RAG; install with: pip install -r requirements.txt"
+        ) from exc
 
     if not chunk_texts or not ids or len(chunk_texts) != len(ids):
         return []
