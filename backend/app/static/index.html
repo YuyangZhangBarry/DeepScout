@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DeepScout</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #f6f4ef;
+        color: #1f2933;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+      }
+
+      .card {
+        width: min(100%, 420px);
+        border: 1px solid #e4dfd4;
+        border-radius: 24px;
+        background: rgba(255, 255, 255, 0.9);
+        box-shadow: 0 24px 80px rgba(31, 41, 51, 0.12);
+        padding: 22px;
+      }
+
+      h1 {
+        margin: 0 0 6px;
+        font-size: 20px;
+        letter-spacing: -0.03em;
+      }
+
+      p {
+        margin: 0 0 18px;
+        color: #65717f;
+        font-size: 13px;
+        line-height: 1.55;
+      }
+
+      textarea {
+        width: 100%;
+        min-height: 138px;
+        resize: vertical;
+        border: 1px solid #ddd7cc;
+        border-radius: 16px;
+        padding: 14px;
+        font: inherit;
+        line-height: 1.45;
+        outline: none;
+        background: #fffdf9;
+      }
+
+      textarea:focus {
+        border-color: #9a8462;
+        box-shadow: 0 0 0 4px rgba(154, 132, 98, 0.12);
+      }
+
+      .row {
+        display: flex;
+        gap: 10px;
+        margin-top: 12px;
+      }
+
+      button,
+      a.button {
+        flex: 1;
+        border: 0;
+        border-radius: 999px;
+        padding: 11px 14px;
+        font: inherit;
+        font-weight: 650;
+        text-align: center;
+        text-decoration: none;
+        cursor: pointer;
+      }
+
+      button {
+        color: #fff;
+        background: #1f2933;
+      }
+
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.55;
+      }
+
+      a.button {
+        color: #1f2933;
+        background: #eee8dc;
+      }
+
+      .status {
+        min-height: 22px;
+        margin-top: 14px;
+        font-size: 12px;
+        color: #65717f;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <h1>DeepScout</h1>
+      <p>Ask a research question. DeepScout will run the job in the background and generate a PDF report.</p>
+      <textarea id="question" placeholder="e.g. What are the latest methods for retrieval augmented generation evaluation?"></textarea>
+      <div class="row">
+        <button id="run">Generate PDF</button>
+        <a id="download" class="button" href="#" hidden>Download</a>
+      </div>
+      <div id="status" class="status">Ready.</div>
+    </main>
+
+    <script>
+      const button = document.querySelector("#run");
+      const download = document.querySelector("#download");
+      const question = document.querySelector("#question");
+      const status = document.querySelector("#status");
+
+      function setStatus(text) {
+        status.textContent = text;
+      }
+
+      async function poll(jobId) {
+        const res = await fetch(`/v1/research/jobs/${jobId}`);
+        if (!res.ok) throw new Error(`Poll failed: ${res.status}`);
+        const data = await res.json();
+        if (data.status === "completed") {
+          download.href = `/v1/research/jobs/${jobId}/pdf`;
+          download.hidden = false;
+          setStatus("PDF is ready.");
+          button.disabled = false;
+          return;
+        }
+        if (data.status === "failed") {
+          throw new Error(data.error || "Research job failed.");
+        }
+        const phase = data.phase ? ` (${data.phase})` : "";
+        setStatus(`Working${phase}...`);
+        setTimeout(() => poll(jobId).catch(handleError), 1200);
+      }
+
+      function attachEvents(jobId) {
+        if (!window.EventSource) {
+          poll(jobId).catch(handleError);
+          return;
+        }
+        const source = new EventSource(`/v1/research/jobs/${jobId}/events`);
+        source.onmessage = (event) => {
+          const data = JSON.parse(event.data);
+          if (data.done) {
+            source.close();
+            if (data.status === "completed") {
+              download.href = `/v1/research/jobs/${jobId}/pdf`;
+              download.hidden = false;
+              setStatus("PDF is ready.");
+              button.disabled = false;
+            } else {
+              handleError(new Error(data.error || "Research job failed."));
+            }
+            return;
+          }
+          const detail = data.detail ? `: ${data.detail}` : "";
+          setStatus(`${data.phase || "WORKING"}${detail}`);
+        };
+        source.onerror = () => {
+          source.close();
+          poll(jobId).catch(handleError);
+        };
+      }
+
+      function handleError(error) {
+        button.disabled = false;
+        setStatus(error.message || "Something went wrong.");
+      }
+
+      button.addEventListener("click", async () => {
+        const q = question.value.trim();
+        if (q.length < 4) {
+          setStatus("Please enter a longer question.");
+          return;
+        }
+        button.disabled = true;
+        download.hidden = true;
+        setStatus("Starting...");
+        try {
+          const res = await fetch("/v1/research/jobs", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ question: q }),
+          });
+          if (!res.ok) throw new Error(`Start failed: ${res.status}`);
+          const data = await res.json();
+          setStatus("Queued.");
+          attachEvents(data.job_id);
+        } catch (error) {
+          handleError(error);
+        }
+      });
+    </script>
+  </body>
+</html>
