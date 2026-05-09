@@ -1,4 +1,5 @@
 .env
+TESTING.md
 .venv/
 venv/
 __pycache__/

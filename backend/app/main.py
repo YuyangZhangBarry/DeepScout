@@ -1,11 +1,13 @@
 import logging
 import sys
 import uuid
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from backend.app.config import get_settings
 from backend.app.middleware.request_id import REQUEST_ID_HEADER, RequestIDMiddleware
@@ -131,6 +133,9 @@ def create_app() -> FastAPI:
 
     app.include_router(tools_router.router, prefix="/v1/tools", tags=["tools"])
     app.include_router(research_router.router, prefix="/v1/research", tags=["research"])
+    static_dir = Path(__file__).parent / "static"
+    if static_dir.exists():
+        app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
 
     return app
 

@@ -4,7 +4,7 @@ import logging
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import ValidationError
 
 from backend.app.schemas_research import (
@@ -15,6 +15,7 @@ from backend.app.schemas_research import (
 )
 from backend.app.services.research_jobs import execute_research_job, get_research_job_store
 from backend.app.services.research_v0 import run_research_v0
+from backend.app.services.report_pdf import render_research_pdf
 
 logger = logging.getLogger(__name__)
 
@@ -142,4 +143,28 @@ async def stream_research_job_events(job_id: str) -> StreamingResponse:
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+@router.get(
+    "/jobs/{job_id}/pdf",
+    summary="Download a completed research job as a PDF report",
+)
+async def download_research_job_pdf(job_id: str) -> Response:
+    store = get_research_job_store()
+    snap = await store.snapshot(job_id)
+    if not snap:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Unknown job_id")
+    if snap.get("status") != "completed" or not snap.get("result"):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail="Research job is not completed yet",
+        )
+
+    result = ResearchResponseBody.model_validate(snap["result"])
+    pdf = render_research_pdf(result)
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="deepscout-{job_id}.pdf"'},
     )

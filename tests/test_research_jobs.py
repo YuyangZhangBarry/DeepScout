@@ -84,3 +84,18 @@ def test_job_events_stream_ends_with_done(_mock_exec, client) -> None:
                 break
         assert '"done": true' in buf
         assert "completed" in buf
+
+
+@patch(
+    "backend.app.routers.research.execute_research_job",
+    side_effect=_complete_job_with_stub_result,
+)
+def test_completed_job_pdf_download(_mock_exec, client) -> None:
+    r = client.post("/v1/research/jobs", json={"question": "PDF test question here"})
+    assert r.status_code == 202
+    job_id = r.json()["job_id"]
+
+    pdf = client.get(f"/v1/research/jobs/{job_id}/pdf")
+    assert pdf.status_code == 200
+    assert pdf.headers["content-type"] == "application/pdf"
+    assert pdf.content.startswith(b"%PDF-1.4")

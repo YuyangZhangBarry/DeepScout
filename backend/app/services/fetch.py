@@ -1,7 +1,11 @@
 import asyncio
 import hashlib
 import logging
+import time
+from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator
 from typing import Iterable
+from urllib.parse import urlparse
 
 import httpx
 import trafilatura
@@ -19,6 +23,49 @@ def _sha256_hex(data: bytes) -> str:
 
 def _content_hash_from_text(text: str) -> str:
     return _sha256_hex(text.encode("utf-8"))
+
+
+def _host_key(url: str) -> str:
+    parsed = urlparse(url)
+    return parsed.netloc.lower() or "__invalid__"
+
+
+class _HostRateLimiter:
+    """Bound concurrent fetches per host and keep a small delay between host hits."""
+
+    def __init__(self, *, per_host_concurrent: int, per_host_delay_seconds: float) -> None:
+        self._per_host_concurrent = max(1, per_host_concurrent)
+        self._delay = max(0.0, per_host_delay_seconds)
+        self._semaphores: dict[str, asyncio.Semaphore] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._last_started: dict[str, float] = {}
+        self._state_lock = asyncio.Lock()
+
+    async def _state_for_host(self, host: str) -> tuple[asyncio.Semaphore, asyncio.Lock]:
+        async with self._state_lock:
+            sem = self._semaphores.get(host)
+            if sem is None:
+                sem = asyncio.Semaphore(self._per_host_concurrent)
+                self._semaphores[host] = sem
+            lock = self._locks.get(host)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._locks[host] = lock
+            return sem, lock
+
+    @asynccontextmanager
+    async def slot(self, url: str) -> AsyncIterator[None]:
+        host = _host_key(url)
+        sem, lock = await self._state_for_host(host)
+        async with sem:
+            async with lock:
+                if self._delay > 0:
+                    now = time.monotonic()
+                    wait_for = self._last_started.get(host, 0.0) + self._delay - now
+                    if wait_for > 0:
+                        await asyncio.sleep(wait_for)
+                self._last_started[host] = time.monotonic()
+            yield
 
 
 async def fetch_url(
@@ -109,6 +156,10 @@ async def fetch_urls(
         return []
 
     sem = asyncio.Semaphore(cfg.fetch_max_concurrent)
+    host_limiter = _HostRateLimiter(
+        per_host_concurrent=cfg.fetch_per_host_max_concurrent,
+        per_host_delay_seconds=cfg.fetch_per_host_delay_seconds,
+    )
     shared_client: httpx.AsyncClient | None = httpx.AsyncClient(
         follow_redirects=True,
         headers={"User-Agent": cfg.http_user_agent},
@@ -116,7 +167,8 @@ async def fetch_urls(
 
     async def _one(u: str) -> FetchedDocument:
         async with sem:
-            return await fetch_url(u, settings=cfg, client=shared_client)
+            async with host_limiter.slot(u):
+                return await fetch_url(u, settings=cfg, client=shared_client)
 
     try:
         return list(await asyncio.gather(*[_one(u) for u in url_list]))

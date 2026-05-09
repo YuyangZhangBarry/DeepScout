@@ -26,7 +26,10 @@ class Settings(BaseSettings):
     semantic_scholar_api_key: str = ""
     # Anonymous S2 quota is tight; sequential + delay reduces 429 vs asyncio.gather burst.
     semantic_scholar_parallel: bool = False
-    semantic_scholar_inter_query_delay_seconds: float = 0.55
+    # Extra pause between sub-queries (in addition to min_seconds_between_requests).
+    semantic_scholar_inter_query_delay_seconds: float = 0.0
+    # Introductory S2 key tier is ~1 request/s across endpoints; enforce globally per process.
+    semantic_scholar_min_seconds_between_requests: float = 1.0
 
     # Optional general web search (https://tavily.com/) when SEARCH_PROVIDER=tavily
     tavily_api_key: str = ""
@@ -36,6 +39,8 @@ class Settings(BaseSettings):
     http_user_agent: str = "DeepScout/0.1 (research bot; contact: local)"
     fetch_timeout_seconds: float = 25.0
     fetch_max_concurrent: int = 5
+    fetch_per_host_max_concurrent: int = 2
+    fetch_per_host_delay_seconds: float = 0.25
 
     # Research v0 (planning + synthesis, no vector DB yet)
     research_max_subqueries: int = 8

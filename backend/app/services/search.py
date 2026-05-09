@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from typing import Iterable
 
 import httpx
@@ -12,6 +13,33 @@ logger = logging.getLogger(__name__)
 
 TAVILY_SEARCH_URL = "https://api.tavily.com/search"
 SEMANTIC_SCHOLAR_SEARCH_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
+
+# Process-wide spacing for Semantic Scholar paper/search (key tier often ~1 req/s).
+_s2_rate_lock = asyncio.Lock()
+_s2_next_available_monotonic: float = 0.0
+
+
+async def _semantic_scholar_get_throttled(
+    client: httpx.AsyncClient,
+    *,
+    url: str,
+    params: dict[str, str | int],
+    headers: dict[str, str],
+    timeout: float,
+    settings: Settings,
+) -> httpx.Response:
+    global _s2_next_available_monotonic
+    interval = max(0.0, settings.semantic_scholar_min_seconds_between_requests)
+    async with _s2_rate_lock:
+        if interval > 0:
+            now = time.monotonic()
+            wait_s = _s2_next_available_monotonic - now
+            if wait_s > 0:
+                await asyncio.sleep(wait_s)
+        response = await client.get(url, params=params, headers=headers, timeout=timeout)
+        if interval > 0:
+            _s2_next_available_monotonic = time.monotonic() + interval
+        return response
 
 
 def _hit_dedup_key(hit: SearchHit) -> str:
@@ -95,11 +123,13 @@ async def _semantic_scholar_search_one(
     response: httpx.Response | None = None
     max_attempts = 5
     for attempt in range(max_attempts):
-        response = await client.get(
-            SEMANTIC_SCHOLAR_SEARCH_URL,
+        response = await _semantic_scholar_get_throttled(
+            client,
+            url=SEMANTIC_SCHOLAR_SEARCH_URL,
             params=params,
             headers=headers,
             timeout=60.0,
+            settings=settings,
         )
         if response.status_code == 429 and attempt < max_attempts - 1:
             wait_s = min(30.0, 2.0 * (2**attempt))
