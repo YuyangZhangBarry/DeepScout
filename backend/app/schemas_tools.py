@@ -8,7 +8,7 @@ class SearchHit(BaseModel):
     source_query: str = ""
     paper_id: str | None = Field(
         default=None,
-        description="Semantic Scholar paperId when provider is semantic_scholar",
+        description="Provider paper id (Semantic Scholar paperId or arxiv:<id>)",
     )
 
 

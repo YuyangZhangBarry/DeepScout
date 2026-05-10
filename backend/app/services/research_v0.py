@@ -16,6 +16,7 @@ from backend.app.schemas_research import (
     ResearchResponseBody,
 )
 from backend.app.services.fetch import fetch_urls_with_retry
+from backend.app.services.citation_numbering import apply_numbered_citations
 from backend.app.services.embeddings import embedding_credentials_configured
 from backend.app.services.llm import (
     DeepseekClient,
@@ -221,12 +222,14 @@ def _finalize_answer_against_evidence(
             )
         )
 
-    return ResearchAnswerPayload(
-        executive_summary=payload.executive_summary,
-        key_points=key_points,
-        limitations=payload.limitations,
-        report_markdown=payload.report_markdown,
-        citations=citations,
+    return apply_numbered_citations(
+        ResearchAnswerPayload(
+            executive_summary=payload.executive_summary,
+            key_points=key_points,
+            limitations=payload.limitations,
+            report_markdown=payload.report_markdown,
+            citations=citations,
+        )
     )
 
 

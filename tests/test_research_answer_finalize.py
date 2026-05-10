@@ -47,10 +47,14 @@ def test_finalize_drops_unknown_source_ids_and_rewrites_citations() -> None:
         ],
     )
     out = _finalize_answer_against_evidence(answer, ev)
-    assert out.key_points[0].source_ids == ["s0"]
+    assert out.key_points[0].source_ids == ["1"]
     ids = {c.source_id for c in out.citations}
     assert ids == {"s0", "s1"}
+    labels = [c.citation_label for c in out.citations]
+    assert sorted(x for x in labels if x is not None) == [1, 2]
     s0 = next(c for c in out.citations if c.source_id == "s0")
+    assert s0.citation_label == 1
     assert s0.url == "https://example.com/a"
     assert s0.title == "Paper A"
     assert s0.paper_id == "p0"
+    assert out.executive_summary == "Uses [1] and fake [s99]."

@@ -4,6 +4,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
+from backend.app.logging_context import bind_trace_id, reset_trace_id
+
 
 REQUEST_ID_HEADER = "X-Request-ID"
 
@@ -16,7 +18,10 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
         candidate = (raw or "").strip()
         request_id = candidate or str(uuid.uuid4())
         request.state.request_id = request_id
-
-        response = await call_next(request)
-        response.headers[REQUEST_ID_HEADER] = request_id
-        return response
+        token = bind_trace_id(request_id)
+        try:
+            response = await call_next(request)
+            response.headers[REQUEST_ID_HEADER] = request_id
+            return response
+        finally:
+            reset_trace_id(token)

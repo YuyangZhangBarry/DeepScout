@@ -44,6 +44,11 @@ class KeyPoint(BaseModel):
 
 class CitationEntry(BaseModel):
     source_id: str
+    citation_label: int | None = Field(
+        default=None,
+        ge=1,
+        description="1-based bibliography index after numbering; PDF anchors use cite-{n}.",
+    )
     paper_id: str | None = None
     url: str
     title: str = ""

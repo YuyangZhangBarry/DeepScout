@@ -10,6 +10,8 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.app.config import get_settings
+from backend.app.logging_context import TraceIdFilter
+from backend.app.middleware.http_step import HttpStepLoggingMiddleware
 from backend.app.middleware.request_id import REQUEST_ID_HEADER, RequestIDMiddleware
 from backend.app.routers import research as research_router
 from backend.app.routers import tools as tools_router
@@ -20,9 +22,9 @@ logger = logging.getLogger(__name__)
 _backend_logging_installed = False
 
 
-def _configure_app_logging(*, debug: bool) -> None:
+def _configure_app_logging(*, debug: bool, log_file: str = "") -> None:
     """
-    Ensure `backend.*` INFO logs appear on stderr.
+    Ensure `backend.*` INFO logs appear on stderr, and optionally append to a UTF-8 file.
 
     Uvicorn's default dictConfig often leaves app loggers without a visible handler;
     only setting `.setLevel()` is not enough. We attach one StreamHandler on `backend`
@@ -34,12 +36,25 @@ def _configure_app_logging(*, debug: bool) -> None:
     root_backend = logging.getLogger("backend")
     root_backend.setLevel(level)
     if not _backend_logging_installed:
-        handler = logging.StreamHandler(sys.stderr)
-        handler.setLevel(level)
-        handler.setFormatter(
-            logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+        fmt = logging.Formatter(
+            "%(asctime)s %(levelname)s %(name)s [trace=%(trace_id)s] %(message)s"
         )
-        root_backend.addHandler(handler)
+        stream = logging.StreamHandler(sys.stderr)
+        stream.setLevel(level)
+        stream.addFilter(TraceIdFilter())
+        stream.setFormatter(fmt)
+        root_backend.addHandler(stream)
+
+        log_path = (log_file or "").strip()
+        if log_path:
+            path = Path(log_path).expanduser()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            file_handler = logging.FileHandler(path, encoding="utf-8")
+            file_handler.setLevel(level)
+            file_handler.addFilter(TraceIdFilter())
+            file_handler.setFormatter(fmt)
+            root_backend.addHandler(file_handler)
+
         root_backend.propagate = False
         _backend_logging_installed = True
 
@@ -64,7 +79,7 @@ def _error_payload(
 
 def create_app() -> FastAPI:
     settings = get_settings()
-    _configure_app_logging(debug=settings.debug)
+    _configure_app_logging(debug=settings.debug, log_file=settings.log_file)
     app = FastAPI(
         title=settings.app_name,
         description=(
@@ -75,6 +90,9 @@ def create_app() -> FastAPI:
         debug=settings.debug,
     )
 
+    # LIFO: last added runs outermost. RequestID must run first so state.request_id exists
+    # before HttpStepLoggingMiddleware logs each request.
+    app.add_middleware(HttpStepLoggingMiddleware)
     app.add_middleware(RequestIDMiddleware)
 
     @app.exception_handler(HTTPException)

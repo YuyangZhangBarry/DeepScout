@@ -13,6 +13,8 @@ class Settings(BaseSettings):
 
     app_name: str = "DeepScout"
     debug: bool = False
+    # If non-empty, append `backend.*` logs here (UTF-8), e.g. ./data/logs/app.log (data/ is gitignored).
+    log_file: str = ""
 
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
@@ -21,8 +23,9 @@ class Settings(BaseSettings):
     # Optional OpenAI key (e.g. same vendor); used as fallback for embeddings when EMBEDDING_API_KEY is empty
     openai_api_key: str = ""
 
-    # Literature search (default: Semantic Scholar Graph API)
-    search_provider: str = "semantic_scholar"
+    # Literature search. Comma-separated providers are supported for complementary retrieval.
+    # Default: Semantic Scholar Graph API + arXiv official API.
+    search_provider: str = "semantic_scholar,arxiv"
     semantic_scholar_api_key: str = ""
     # Anonymous S2 quota is tight; sequential + delay reduces 429 vs asyncio.gather burst.
     semantic_scholar_parallel: bool = False
@@ -34,6 +37,7 @@ class Settings(BaseSettings):
     # Optional general web search (https://tavily.com/) when SEARCH_PROVIDER=tavily
     tavily_api_key: str = ""
     search_max_results_per_query: int = 5
+    arxiv_min_seconds_between_requests: float = 3.0
 
     # HTTP fetch
     http_user_agent: str = "DeepScout/0.1 (research bot; contact: local)"
@@ -57,9 +61,14 @@ class Settings(BaseSettings):
     rag_enabled: bool = True
     chroma_persist_directory: str = "./data/chroma"
     embedding_api_key: str = ""  # if empty, falls back to openai_api_key
-    embedding_base_url: str = "https://api.openai.com/v1"
+    # Root or .../v1 — code normalizes so the POST path is never .../v1/v1/embeddings
+    embedding_base_url: str = "https://api.openai.com"
     embedding_model: str = "text-embedding-3-small"
     embedding_batch_size: int = 32
+    # OpenAI embedding tiers are often ~100 RPM; space batches to reduce 429 bursts.
+    embedding_min_seconds_between_batches: float = 0.65
+    embedding_max_retries: int = 8
+    embedding_retry_base_seconds: float = 1.0
     rag_chunk_size: int = 900
     rag_chunk_overlap: int = 120
     rag_top_k: int = 12
@@ -71,11 +80,18 @@ class Settings(BaseSettings):
     @field_validator("search_provider")
     @classmethod
     def validate_search_provider(cls, v: str) -> str:
-        allowed = {"semantic_scholar", "tavily"}
-        key = (v or "semantic_scholar").strip().lower()
-        if key not in allowed:
-            raise ValueError(f"search_provider must be one of {sorted(allowed)}")
-        return key
+        allowed = {"semantic_scholar", "arxiv", "tavily"}
+        raw = (v or "semantic_scholar,arxiv").strip().lower()
+        keys = [p.strip() for p in raw.split(",") if p.strip()]
+        if not keys:
+            keys = ["semantic_scholar", "arxiv"]
+        invalid = [p for p in keys if p not in allowed]
+        if invalid:
+            raise ValueError(f"search_provider entries must be one of {sorted(allowed)}")
+        if "tavily" in keys and len(keys) > 1:
+            raise ValueError("tavily cannot be combined with academic providers")
+        deduped = list(dict.fromkeys(keys))
+        return ",".join(deduped)
 
 
 @lru_cache

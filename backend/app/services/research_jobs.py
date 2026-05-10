@@ -7,6 +7,7 @@ import time
 import uuid
 from typing import Any
 
+from backend.app.logging_context import trace_scope
 from backend.app.schemas_research import ResearchRequestBody, ResearchResponseBody
 from backend.app.services.research_phases import ResearchPhase
 
@@ -103,9 +104,10 @@ async def execute_research_job(job_id: str, body: ResearchRequestBody) -> None:
     async def on_progress(phase: ResearchPhase, detail: str = "") -> None:
         await store.push_event(job_id, phase.value, detail)
 
-    try:
-        result = await run_research_v0(body, on_progress=on_progress)
-        await store.set_result(job_id, result)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("research job %s failed", job_id)
-        await store.set_failed(job_id, str(exc))
+    with trace_scope(f"job:{job_id}"):
+        try:
+            result = await run_research_v0(body, on_progress=on_progress)
+            await store.set_result(job_id, result)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("research job %s failed", job_id)
+            await store.set_failed(job_id, str(exc))

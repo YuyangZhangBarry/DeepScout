@@ -1,6 +1,8 @@
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from backend.app.config import get_settings
 from backend.app.main import create_app
@@ -17,6 +19,15 @@ def test_search_tavily_without_key_returns_503(monkeypatch, clear_settings_cache
     body = r.json()
     assert body["error"]["code"] == "http_503"
     assert "TAVILY_API_KEY" in body["error"]["message"]
+
+
+def test_search_provider_rejects_tavily_combined_with_academic(
+    monkeypatch, clear_settings_cache
+) -> None:
+    monkeypatch.setenv("SEARCH_PROVIDER", "semantic_scholar,tavily")
+    get_settings.cache_clear()
+    with pytest.raises(ValidationError, match="tavily cannot be combined"):
+        create_app()
 
 
 @patch("backend.app.routers.tools.search_literature", new_callable=AsyncMock)

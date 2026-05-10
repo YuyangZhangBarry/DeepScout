@@ -98,4 +98,4 @@ def test_completed_job_pdf_download(_mock_exec, client) -> None:
     pdf = client.get(f"/v1/research/jobs/{job_id}/pdf")
     assert pdf.status_code == 200
     assert pdf.headers["content-type"] == "application/pdf"
-    assert pdf.content.startswith(b"%PDF-1.4")
+    assert pdf.content.startswith(b"%PDF")

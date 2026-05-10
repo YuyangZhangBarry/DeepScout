@@ -51,10 +51,11 @@ def _index_and_query_sync(
         k = min(top_k, len(ids))
         if k <= 0:
             return []
+        # Chroma >=0.5: `include` must not list "ids" (ids are still returned on the result).
         res = coll.query(
             query_embeddings=[query_embedding],
             n_results=k,
-            include=["documents", "metadatas", "distances", "ids"],
+            include=["documents", "metadatas", "distances"],
         )
         docs = (res.get("documents") or [[]])[0] or []
         metas = (res.get("metadatas") or [[]])[0] or []

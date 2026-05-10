@@ -1,7 +1,9 @@
 import asyncio
 import logging
+import re
 import time
 from typing import Iterable
+from xml.etree import ElementTree as ET
 
 import httpx
 
@@ -13,10 +15,15 @@ logger = logging.getLogger(__name__)
 
 TAVILY_SEARCH_URL = "https://api.tavily.com/search"
 SEMANTIC_SCHOLAR_SEARCH_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
+ARXIV_SEARCH_URL = "https://export.arxiv.org/api/query"
+ARXIV_NS = {"atom": "http://www.w3.org/2005/Atom"}
+ARXIV_ID_RE = re.compile(r"arxiv\.org/(?:abs|pdf)/([^?#/]+)", re.IGNORECASE)
 
 # Process-wide spacing for Semantic Scholar paper/search (key tier often ~1 req/s).
 _s2_rate_lock = asyncio.Lock()
 _s2_next_available_monotonic: float = 0.0
+_arxiv_rate_lock = asyncio.Lock()
+_arxiv_next_available_monotonic: float = 0.0
 
 
 async def _semantic_scholar_get_throttled(
@@ -42,7 +49,36 @@ async def _semantic_scholar_get_throttled(
         return response
 
 
+async def _arxiv_get_throttled(
+    client: httpx.AsyncClient,
+    *,
+    params: dict[str, str | int],
+    headers: dict[str, str],
+    settings: Settings,
+) -> httpx.Response:
+    global _arxiv_next_available_monotonic
+    interval = max(0.0, settings.arxiv_min_seconds_between_requests)
+    async with _arxiv_rate_lock:
+        if interval > 0:
+            now = time.monotonic()
+            wait_s = _arxiv_next_available_monotonic - now
+            if wait_s > 0:
+                await asyncio.sleep(wait_s)
+        response = await client.get(
+            ARXIV_SEARCH_URL,
+            params=params,
+            headers=headers,
+            timeout=60.0,
+        )
+        if interval > 0:
+            _arxiv_next_available_monotonic = time.monotonic() + interval
+        return response
+
+
 def _hit_dedup_key(hit: SearchHit) -> str:
+    arxiv_match = ARXIV_ID_RE.search(hit.url or "")
+    if arxiv_match:
+        return f"arxiv:{arxiv_match.group(1).removesuffix('.pdf')}"
     if hit.paper_id:
         return f"paper:{hit.paper_id}"
     return url_dedup_key(hit.url)
@@ -155,6 +191,75 @@ async def _semantic_scholar_search_one(
     return hits
 
 
+def _atom_text(parent: ET.Element, path: str) -> str:
+    node = parent.find(path, ARXIV_NS)
+    return (node.text or "").strip() if node is not None else ""
+
+
+def _arxiv_entry_to_hit(entry: ET.Element, source_query: str) -> SearchHit | None:
+    entry_id = _atom_text(entry, "atom:id")
+    if not entry_id:
+        return None
+    arxiv_id = entry_id.rstrip("/").split("/")[-1]
+    title = " ".join(_atom_text(entry, "atom:title").split())
+    summary = " ".join(_atom_text(entry, "atom:summary").split())
+    published = _atom_text(entry, "atom:published")
+    authors = [
+        (name.text or "").strip()
+        for name in entry.findall("atom:author/atom:name", ARXIV_NS)
+        if (name.text or "").strip()
+    ]
+    meta_parts: list[str] = []
+    if published:
+        meta_parts.append(published[:10])
+    if authors:
+        author_line = ", ".join(authors[:12])
+        if len(authors) > 12:
+            author_line += ", et al."
+        meta_parts.append(author_line)
+    header = " · ".join(meta_parts)
+    snippet = f"{header}\n\n{summary}".strip() if header else summary
+    pdf_url = ""
+    for link in entry.findall("atom:link", ARXIV_NS):
+        if link.attrib.get("title") == "pdf" and link.attrib.get("href"):
+            pdf_url = link.attrib["href"].strip()
+            break
+    url = pdf_url or entry_id
+    return SearchHit(
+        url=url,
+        title=title,
+        snippet=snippet,
+        source_query=source_query,
+        paper_id=f"arxiv:{arxiv_id}" if arxiv_id else None,
+    )
+
+
+async def _arxiv_search_one(
+    client: httpx.AsyncClient,
+    *,
+    query: str,
+    max_results: int,
+    settings: Settings,
+) -> list[SearchHit]:
+    params = {
+        "search_query": f"all:{query}",
+        "start": 0,
+        "max_results": max_results,
+        "sortBy": "relevance",
+        "sortOrder": "descending",
+    }
+    headers = {"User-Agent": settings.http_user_agent}
+    response = await _arxiv_get_throttled(client, params=params, headers=headers, settings=settings)
+    response.raise_for_status()
+    root = ET.fromstring(response.text)
+    hits: list[SearchHit] = []
+    for entry in root.findall("atom:entry", ARXIV_NS):
+        hit = _arxiv_entry_to_hit(entry, query)
+        if hit is not None:
+            hits.append(hit)
+    return hits
+
+
 async def _tavily_search_one(
     client: httpx.AsyncClient,
     *,
@@ -259,6 +364,60 @@ async def _search_tavily(
     return _dedupe_hits_preserving_order(merged)
 
 
+async def _search_arxiv(
+    queries: list[str],
+    *,
+    max_results_per_query: int,
+    settings: Settings,
+    client: httpx.AsyncClient,
+) -> list[SearchHit]:
+    merged: list[SearchHit] = []
+    for q in queries:
+        try:
+            batch = await _arxiv_search_one(
+                client,
+                query=q,
+                max_results=max_results_per_query,
+                settings=settings,
+            )
+            merged.extend(batch)
+        except Exception as exc:  # noqa: BLE001 — one provider/query should not abort research
+            logger.warning("arxiv search failed for query=%r: %s", q, exc)
+    return _dedupe_hits_preserving_order(merged)
+
+
+async def _search_provider(
+    provider: str,
+    queries: list[str],
+    *,
+    max_results_per_query: int,
+    settings: Settings,
+    client: httpx.AsyncClient,
+) -> list[SearchHit]:
+    if provider == "semantic_scholar":
+        return await _search_semantic_scholar(
+            queries,
+            max_results_per_query=max_results_per_query,
+            settings=settings,
+            client=client,
+        )
+    if provider == "arxiv":
+        return await _search_arxiv(
+            queries,
+            max_results_per_query=max_results_per_query,
+            settings=settings,
+            client=client,
+        )
+    if provider == "tavily":
+        return await _search_tavily(
+            queries,
+            max_results_per_query=max_results_per_query,
+            settings=settings,
+            client=client,
+        )
+    raise RuntimeError(f"Unsupported search provider: {provider}")
+
+
 async def search_literature(
     queries: list[str],
     *,
@@ -269,7 +428,8 @@ async def search_literature(
     """
     Parallel literature search, merge and de-duplicate.
 
-    Default provider is Semantic Scholar (papers). Set SEARCH_PROVIDER=tavily for general web.
+    Default provider is Semantic Scholar + arXiv. Set SEARCH_PROVIDER=tavily for general web,
+    or a comma-separated academic list such as "semantic_scholar,arxiv".
     """
     cfg = settings or get_settings()
     cleaned = [q.strip() for q in queries if q and q.strip()]
@@ -277,19 +437,31 @@ async def search_literature(
         return []
 
     limit = max_results_per_query or cfg.search_max_results_per_query
+    providers = [p.strip() for p in cfg.search_provider.split(",") if p.strip()]
+    logger.info(
+        "[step=search] action=search_start n_queries=%s providers=%s limit=%s",
+        len(cleaned),
+        ",".join(providers) if providers else "-",
+        limit,
+    )
 
     own_client = client is None
     if own_client:
         client = httpx.AsyncClient()
 
     try:
-        if cfg.search_provider == "tavily":
-            return await _search_tavily(
-                cleaned, max_results_per_query=limit, settings=cfg, client=client
+        merged: list[SearchHit] = []
+        for provider in providers:
+            batch = await _search_provider(
+                provider,
+                cleaned,
+                max_results_per_query=limit,
+                settings=cfg,
+                client=client,
             )
-        return await _search_semantic_scholar(
-            cleaned, max_results_per_query=limit, settings=cfg, client=client
-        )
+            logger.info("[search] provider=%s n_hits=%s", provider, len(batch))
+            merged.extend(batch)
+        return _dedupe_hits_preserving_order(merged)
     finally:
         if own_client and client is not None:
             await client.aclose()
