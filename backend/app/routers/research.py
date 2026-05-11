@@ -13,9 +13,9 @@ from backend.app.schemas_research import (
     ResearchRequestBody,
     ResearchResponseBody,
 )
+from backend.app.services.report_localize import render_localized_research_pdf
 from backend.app.services.research_jobs import execute_research_job, get_research_job_store
 from backend.app.services.research_v0 import run_research_v0
-from backend.app.services.report_pdf import render_research_pdf
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +162,7 @@ async def download_research_job_pdf(job_id: str) -> Response:
         )
 
     result = ResearchResponseBody.model_validate(snap["result"])
-    pdf = render_research_pdf(result)
+    pdf = await render_localized_research_pdf(result)
     return Response(
         content=pdf,
         media_type="application/pdf",

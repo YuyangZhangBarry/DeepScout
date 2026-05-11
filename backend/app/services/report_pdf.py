@@ -9,23 +9,32 @@ from typing import NamedTuple
 
 import markdown
 from backend.app.schemas_research import CitationEntry, ResearchResponseBody
+from backend.app.services.report_localize import get_pdf_labels
 
 logger = logging.getLogger(__name__)
+
+# English defaults; localized variants live in report_localize.PDF_LABELS.
+DEFAULT_LABELS: dict[str, str] = get_pdf_labels("en")
 
 # --- Markdown source (shared by all renderers) --------------------------------
 
 
-def research_result_to_markdown(result: ResearchResponseBody) -> str:
+def research_result_to_markdown(
+    result: ResearchResponseBody,
+    *,
+    labels: dict[str, str] | None = None,
+) -> str:
+    lbl = labels or DEFAULT_LABELS
     parts = [
-        "# DeepScout Research Report",
+        f"# {lbl['report_title']}",
         "",
-        "## Question",
+        f"## {lbl['question']}",
         result.question,
         "",
-        "## Executive Summary",
+        f"## {lbl['executive_summary']}",
         result.answer.executive_summary,
         "",
-        "## Key Points",
+        f"## {lbl['key_points']}",
     ]
     if result.answer.key_points:
         for point in result.answer.key_points:
@@ -34,14 +43,14 @@ def research_result_to_markdown(result: ResearchResponseBody) -> str:
                 refs = " " + ", ".join(f"[{sid}]" for sid in point.source_ids)
             parts.append(f"- {point.text}{refs}")
     else:
-        parts.append("- No key points returned.")
+        parts.append(f"- {lbl['no_key_points']}")
 
     if result.answer.report_markdown:
-        parts.extend(["", "## Report", result.answer.report_markdown])
+        parts.extend(["", f"## {lbl['report']}", result.answer.report_markdown])
     if result.answer.limitations:
-        parts.extend(["", "## Limitations", result.answer.limitations])
+        parts.extend(["", f"## {lbl['limitations']}", result.answer.limitations])
 
-    parts.extend(["", "## Citations"])
+    parts.extend(["", f"## {lbl['citations']}"])
     if result.answer.citations:
         for citation in result.answer.citations:
             title = citation.title or citation.url
@@ -49,7 +58,7 @@ def research_result_to_markdown(result: ResearchResponseBody) -> str:
             tag = str(label) if label is not None else citation.source_id
             parts.append(f"- [{tag}] {title} {citation.url}")
     else:
-        parts.append("- No citations.")
+        parts.append(f"- {lbl['no_citations']}")
 
     return "\n".join(parts).strip() + "\n"
 
@@ -86,12 +95,17 @@ def _html_citations_section_for_pdf(
     citations: list[CitationEntry],
     *,
     include_anchor_ids: bool = True,
+    labels: dict[str, str] | None = None,
 ) -> str:
     """HTML references block; optional ``id="cite-n"`` for WeasyPrint internal links only."""
+    lbl = labels or DEFAULT_LABELS
+    heading_html = (
+        f'<h2 id="section-citations">{html.escape(lbl["citations"])}</h2>'
+    )
     if not citations:
         return (
-            '<h2 id="section-citations">Citations</h2>'
-            '<p class="no-cites">No citations.</p>'
+            heading_html
+            + f'<p class="no-cites">{html.escape(lbl["no_citations"])}</p>'
         )
     items: list[str] = []
     for c in citations:
@@ -109,23 +123,24 @@ def _html_citations_section_for_pdf(
             f'<div class="ref-url">{url}</div>'
             "</li>"
         )
-    return (
-        '<h2 id="section-citations">Citations</h2>'
-        f'<ol class="refs pdf-refs">{"".join(items)}</ol>'
-    )
+    return heading_html + f'<ol class="refs pdf-refs">{"".join(items)}</ol>'
 
 
 def research_pdf_body_html(
     result: ResearchResponseBody,
     *,
     internal_cite_links: bool = True,
+    labels: dict[str, str] | None = None,
 ) -> str:
     """
     Markdown → HTML body for PDF: optional ``#cite-n`` anchors (WeasyPrint).
     fpdf2 does not support HTML fragment links; use ``internal_cite_links=False`` there.
     """
-    md_full = research_result_to_markdown(result)
-    head, sep, _tail = md_full.partition("\n## Citations\n")
+    lbl = labels or DEFAULT_LABELS
+    md_full = research_result_to_markdown(result, labels=lbl)
+    # Split on the localized Citations heading so the references block is re-rendered
+    # with anchor ids/styling by _html_citations_section_for_pdf.
+    head, sep, _tail = md_full.partition(f"\n## {lbl['citations']}\n")
     main_md = head if sep else md_full
     if internal_cite_links:
         main_md = _inject_pdf_inline_citation_links(main_md, result.answer.citations)
@@ -133,25 +148,109 @@ def research_pdf_body_html(
     cites_html = _html_citations_section_for_pdf(
         result.answer.citations,
         include_anchor_ids=internal_cite_links,
+        labels=lbl,
     )
     return body_main + cites_html
 
 
 # --- WeasyPrint (best layout; needs system Pango/Cairo per WeasyPrint docs) ---
 
+# Bundled fonts are reused by both engines (see BUNDLED_FONT_DIR below) to avoid
+# letting WeasyPrint pick a system CFF/OpenType font (e.g. PingFang on macOS).
+# macOS Preview has long-standing issues rendering subsetted CFF (Type0 +
+# /FontFile3) fonts, which surfaces as letters shifted to the wrong codepoints.
+# Using DejaVu TrueType (Type0 + /FontFile2) keeps Preview happy.
+_BUNDLED_FONT_DIR = Path(__file__).resolve().parent.parent / "fonts"
+_BUNDLED_DEJAVU_FAMILY = "DeepScout Sans"
+_CJK_FALLBACK_FAMILY = "DeepScout CJK"
+
+# Candidate CJK TrueType files per weight. Order = preference. We deliberately
+# avoid CFF/OpenType CJK fonts (e.g. PingFang.ttc, Hiragino Sans GB.ttc,
+# NotoSansCJK *.otf) because macOS Preview misrenders subsetted CFF.
+_CJK_TT_CANDIDATES: dict[str, tuple[str, ...]] = {
+    "400": (
+        "/System/Library/Fonts/STHeiti Light.ttc",         # macOS, TrueType ttc
+        "/System/Library/Fonts/Supplemental/Songti.ttc",   # macOS, TrueType ttc
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",    # Debian/Ubuntu, TrueType
+        "/usr/share/fonts/wqy-zenhei/wqy-zenhei.ttc",      # Fedora/Alma
+    ),
+    "700": (
+        "/System/Library/Fonts/STHeiti Medium.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        "/usr/share/fonts/wqy-zenhei/wqy-zenhei.ttc",
+    ),
+}
+
+
+def _first_existing(paths: tuple[str, ...]) -> Path | None:
+    for raw in paths:
+        p = Path(raw)
+        if p.is_file():
+            return p
+    return None
+
+
+def _weasy_font_face_css() -> str:
+    """``@font-face`` rules for the WeasyPrint engine.
+
+    - ``DeepScout Sans``: bundled DejaVu TTFs (Latin / shared symbols).
+    - ``DeepScout CJK``: system-installed Chinese TrueType (``.ttc``) when one
+      is found. Embedding TrueType (not CFF) is what keeps macOS Preview from
+      garbling glyphs after subsetting.
+    """
+    faces: list[str] = []
+    sans_specs = (
+        ("DejaVuSans.ttf", "400", "normal"),
+        ("DejaVuSans-Bold.ttf", "700", "normal"),
+        ("DejaVuSans-Oblique.ttf", "400", "italic"),
+    )
+    for filename, weight, style in sans_specs:
+        path = _BUNDLED_FONT_DIR / filename
+        if not path.is_file():
+            continue
+        faces.append(
+            f"""@font-face {{
+  font-family: "{_BUNDLED_DEJAVU_FAMILY}";
+  src: url("{path.as_uri()}") format("truetype");
+  font-weight: {weight};
+  font-style: {style};
+}}"""
+        )
+
+    for weight, candidates in _CJK_TT_CANDIDATES.items():
+        path = _first_existing(candidates)
+        if path is None:
+            continue
+        # .ttc is a TrueType collection. Pango (used by WeasyPrint) parses it
+        # transparently. format("truetype-collection") hints fontTools.
+        fmt = "truetype-collection" if path.suffix.lower() == ".ttc" else "truetype"
+        faces.append(
+            f"""@font-face {{
+  font-family: "{_CJK_FALLBACK_FAMILY}";
+  src: url("{path.as_uri()}") format("{fmt}");
+  font-weight: {weight};
+  font-style: normal;
+}}"""
+        )
+    return "\n".join(faces)
+
+
 WEASYPRINT_CSS = """
 @page { size: A4; margin: 22mm 20mm 26mm 20mm; }
 html { font-size: 11pt; }
 body {
-  font-family: "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
-    "Noto Sans CJK SC", "Noto Sans", "DejaVu Sans", sans-serif;
+  /* CJK font is intentionally a TrueType family (.ttc); CFF/OpenType CJK such
+     as PingFang causes macOS Preview to misrender subsetted glyphs. */
+  font-family: "DeepScout Sans", "DeepScout CJK", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", "Noto Sans",
+    "DejaVu Sans", sans-serif;
   line-height: 1.55;
   color: #1e293b;
   max-width: 100%;
 }
 h1 {
   font-size: 1.65rem;
-  font-weight: 650;
+  font-weight: 700;
   letter-spacing: -0.02em;
   border-bottom: 1px solid #e2e8f0;
   padding-bottom: 0.35em;
@@ -169,7 +268,8 @@ ul, ol { margin: 0.5em 0 0.75em 1.1em; padding: 0; }
 li { margin: 0.25em 0; }
 a { color: #1d4ed8; text-decoration: none; }
 code, pre {
-  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-family: "DeepScout Sans", "DeepScout CJK", ui-monospace,
+    "SFMono-Regular", Menlo, Consolas, monospace;
   font-size: 0.92em;
 }
 pre {
@@ -210,12 +310,14 @@ ol.pdf-refs li.ref-row {
 
 
 def _html_document_for_weasy(body_html: str) -> str:
+    font_face_css = _weasy_font_face_css()
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8"/>
   <title>DeepScout Research Report</title>
-  <style>{WEASYPRINT_CSS}</style>
+  <style>{font_face_css}
+{WEASYPRINT_CSS}</style>
 </head>
 <body>
 <article class="report">{body_html}</article>
@@ -231,16 +333,23 @@ def _try_render_pdf_weasyprint(html_document: str) -> bytes | None:
         return None
     try:
         base = Path(__file__).resolve().parent
-        return HTML(string=html_document, base_url=str(base)).write_pdf()
+        pdf = HTML(string=html_document, base_url=str(base)).write_pdf()
     except Exception as exc:  # noqa: BLE001
         logger.warning("weasyprint render failed: %s", exc)
         return None
+    cjk_path = _first_existing(_CJK_TT_CANDIDATES["400"])
+    logger.info(
+        "PDF: weasyprint render ok (sans=%s cjk=%s)",
+        _BUNDLED_DEJAVU_FAMILY,
+        cjk_path.name if cjk_path else "<none; PingFang/system fallback>",
+    )
+    return pdf
 
 
 # --- fpdf2 + write_html (no Pango; needs a TTF with glyphs you use) ------------
 
 
-BUNDLED_FONT_DIR = Path(__file__).resolve().parent.parent / "fonts"
+BUNDLED_FONT_DIR = _BUNDLED_FONT_DIR
 
 
 class _FpdfFontSet(NamedTuple):
@@ -488,18 +597,29 @@ def render_pdf_from_markdown(markdown: str) -> bytes:
     return bytes(out)
 
 
-def render_research_pdf(result: ResearchResponseBody) -> bytes:
+def render_research_pdf(
+    result: ResearchResponseBody,
+    *,
+    labels: dict[str, str] | None = None,
+) -> bytes:
+    """Render research as PDF: prefer WeasyPrint (CSS), then fpdf2 + HTML, then legacy PDF.
+
+    ``labels`` controls localized PDF section headings (Question, Executive
+    Summary, ...). Use :func:`report_localize.get_pdf_labels` to obtain one,
+    or call :func:`report_localize.render_localized_research_pdf` which
+    auto-detects the user's language.
     """
-    Render research as PDF: prefer WeasyPrint (CSS), then fpdf2 + HTML, then legacy PDF.
-    """
-    body_html = research_pdf_body_html(result, internal_cite_links=True)
+    lbl = labels or DEFAULT_LABELS
+    body_html = research_pdf_body_html(result, internal_cite_links=True, labels=lbl)
 
     pdf = _try_render_pdf_weasyprint(_html_document_for_weasy(body_html))
     if pdf:
         return pdf
 
     logger.info("PDF: WeasyPrint unavailable or failed; trying fpdf2 HTML (layout may be simpler than WeasyPrint).")
-    body_html_fpdf = research_pdf_body_html(result, internal_cite_links=False)
+    body_html_fpdf = research_pdf_body_html(
+        result, internal_cite_links=False, labels=lbl
+    )
     font_set = _resolve_fpdf_font_set()
     if font_set is not None:
         logger.info(
@@ -515,5 +635,5 @@ def render_research_pdf(result: ResearchResponseBody) -> bytes:
     else:
         logger.info("no Unicode TTF found for fpdf2; using legacy PDF renderer")
 
-    md = research_result_to_markdown(result)
+    md = research_result_to_markdown(result, labels=lbl)
     return render_pdf_from_markdown(md)
